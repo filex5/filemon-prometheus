@@ -1,0 +1,19 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Monitoring system and time series database
+Documentation=https://prometheus.io/docs/introduction/overview/
+
+[Service]
+Restart=always
+User=prometheus
+ExecStart=/usr/local/bin/prometheus \
+  --config.file="/etc/prometheus/prometheus.yml" \
+  --web.listen-address="{{ prometheus_web_listen_address }}" \
+  --storage.tsdb.path /var/lib/prometheus/ \
+  --web.console.templates=/etc/prometheus/consoles \
+  --web.console.libraries=/etc/prometheus/console_libraries
+ExecReload=/bin/kill -HUP $MAINPID
+TimeoutStopSec=20s
+SendSIGKILL=no
+
+[Install]

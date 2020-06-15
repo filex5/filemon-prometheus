@@ -1,0 +1,148 @@
+- name: Get github releases
+  uri:
+    url: https://api.github.com/repos/prometheus/prometheus/releases/latest
+    return_content: true
+  register: _prometheus_github_releases
+  check_mode: false
+
+- name: Get latest version
+  set_fact:
+    _prometheus_latest_version: "{{ _prometheus_github_releases.json.tag_name | replace('v', '') }}"
+    _prometheus_download_url: "{{ _prometheus_github_releases.json.assets | map(attribute='browser_download_url') | select('match', '.*linux-amd64.*') | first }}"
+
+- name: Check latest version
+  debug:
+    msg: |
+      Prometheus version to be installed is {{ prometheus_version }}.
+      The latest Prometheus version is {{ _prometheus_latest_version }}.
+      To upgrade set prometheus_version variable and use "-e prometheus_upgrade=true"
+  changed_when: prometheus_version | string != _prometheus_latest_version | string
+
+- name: Check if prometheus is installed
+  stat:
+    path: /usr/local/bin/prometheus
+  register: _prometheus_binary
+
+- name: Set prometheus_upgrade variable
+  set_fact:
+    prometheus_upgrade: true
+  when: not _prometheus_binary.stat.exists | bool
+
+- name: Set prometheus download url
+  set_fact:
+    _prometheus_download_url: "{{ _prometheus_download_url | replace(_prometheus_latest_version, prometheus_version) }}"
+  when: prometheus_version | string != _prometheus_latest_version | string
+
+- name: Add prometheus user
+  user:
+    name: prometheus
+    system: true
+    create_home: false
+    shell: /usr/sbin/nologin
+
+- name: Add /var/lib/prometheus directories
+  file:
+    name: "{{ item }}"
+    owner: prometheus
+    group: prometheus
+    mode: 0750
+    state: directory
+  loop:
+    - /var/lib/prometheus
+    - /var/lib/prometheus/src
+    - /var/lib/prometheus/src/prometheus
+  when: prometheus_upgrade | bool
+
+- name: Download prometheus release
+  get_url:
+    url: "{{ _prometheus_download_url }}"
+    dest: /var/lib/prometheus/src/prometheus/prometheus-{{ prometheus_version }}.tar.gz
+  when: prometheus_upgrade | bool
+
+- name: Unarchive prometheus release
+  unarchive:
+    src: /var/lib/prometheus/src/prometheus/prometheus-{{ prometheus_version }}.tar.gz
+    dest: /var/lib/prometheus/src/prometheus/
+    remote_src: true
+    creates: /var/lib/prometheus/src/prometheus/prometheus-{{ prometheus_version }}.linux-amd64
+  when: prometheus_upgrade | bool
+
+- name: Add /etc/prometheus directories
+  file:
+    name: "{{ item }}"
+    owner: root
+    group: prometheus
+    mode: 0750
+    state: directory
+  loop:
+    - /etc/prometheus
+    - /etc/prometheus/rules
+
+- name: Add /etc/prometheus directories
+  copy:
+    src: /var/lib/prometheus/src/prometheus/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}
+    dest: /etc/prometheus/{{ item }}
+    remote_src: true
+    owner: prometheus
+    group: prometheus
+    mode: 0750
+  loop:
+    - consoles
+    - console_libraries
+  when: prometheus_upgrade | bool
+
+- name: Add /usr/local/bin files
+  copy:
+    src: /var/lib/prometheus/src/prometheus/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}
+    dest: /usr/local/bin/{{ item }}
+    remote_src: true
+    owner: root
+    group: root
+    mode: 0755
+  loop:
+    - prometheus
+    - promtool
+  when: prometheus_upgrade | bool
+
+- name: Remove /var/lib/prometheus/src/prometheus directory
+  file:
+    name: /var/lib/prometheus/src/prometheus
+    state: absent
+  when: prometheus_remove_src | bool
+
+- name: Add /etc/prometheus/prometheus.yml file
+  template:
+    src: prometheus.yml.j2
+    dest: /etc/prometheus/prometheus.yml
+    owner: root
+    group: prometheus
+    mode: 0640
+    validate: /usr/local/bin/promtool check config %s
+  notify: reload prometheus
+  tags:
+    - prometheus-config
+
+- name: Add /etc/systemd/system/prometheus.service file
+  template:
+    src: prometheus.service.j2
+    dest: /etc/systemd/system/prometheus.service
+    owner: root
+    group: root
+    mode: 0644
+  register: _prometheus_systemd
+  notify: restart prometheus
+  tags:
+    - prometheus-service
+
+- meta: flush_handlers
+
+- name: Start prometheus service
+  systemd:
+    name: prometheus
+    enabled: true
+    state: started
+
+- name: Check if service is running
+  command: >
+    /bin/systemctl is-active prometheus
+  changed_when: false
